@@ -39,7 +39,7 @@ extension Defaults {
 
 	## Dynamically Toggle Syncing
 
-	You can also toggle the syncing behavior dynamically using the ``Defaults/iCloud/add(_:)-5gffb`` and ``Defaults/iCloud/remove(_:)-1b8w5`` methods.
+	You can also toggle the syncing behavior dynamically using the ``Defaults/iCloud/add(_:)`` and ``Defaults/iCloud/remove(_:)-3074m`` methods.
 
 	```swift
 	import Defaults
@@ -82,28 +82,23 @@ extension Defaults {
 		/**
 		Add the keys to be automatically synced.
 		*/
-		public static func add(_ keys: Defaults.Keys...) {
-			synchronizer.add(keys)
-		}
-
-		/**
-		Add the keys to be automatically synced.
-		*/
-		public static func add(_ keys: [Defaults.Keys]) {
-			synchronizer.add(keys)
+		// TODO: Support array of Defaults.Key after Swift 6 pack iteration is supported.
+		// https://github.com/sindresorhus/Defaults/pull/185#discussion_r1704464183
+		public static func add<each Value: Defaults.Serializable>(_ keys: repeat Defaults.Key<each Value>) {
+			repeat synchronizer.add(each keys)
 		}
 
 		/**
 		Remove the keys that are set to be automatically synced.
 		*/
-		public static func remove(_ keys: Defaults.Keys...) {
-			synchronizer.remove(keys)
+		public static func remove<each Value>(_ keys: repeat Defaults.Key<each Value>) {
+			repeat synchronizer.remove(each keys)
 		}
 
 		/**
 		Remove the keys that are set to be automatically synced.
 		*/
-		public static func remove(_ keys: [Defaults.Keys]) {
+		public static func remove(_ keys: [Defaults._AnyKey]) {
 			synchronizer.remove(keys)
 		}
 
@@ -184,7 +179,7 @@ extension Defaults.iCloud {
 	/**
 	Represent different data sources available for synchronization.
 	*/
-	public enum DataSource {
+	enum DataSource {
 		/**
 		Using `key.suite` as data source.
 		*/
@@ -249,11 +244,11 @@ final class iCloudSynchronizer {
 	@Atomic(value: []) private var remoteSyncingKeys: Set<Defaults.Keys>
 
 	// TODO: Replace it with async stream when Swift supports custom executors.
-	private lazy var localKeysMonitor: Defaults.CompositeUserDefaultsAnyKeyObservation = .init { [weak self] observable in
+	private lazy var localKeysMonitor: Defaults.CompositeDefaultsObservation = .init { [weak self] pair, _ in
 		guard
 			let self,
-			let suite = observable.suite,
-			let key = keys.first(where: { $0.name == observable.key && $0.suite == suite }),
+			let suite = pair.suite,
+			let key = keys.first(where: { $0.name == pair.key && $0.suite == suite }),
 			// Prevent triggering local observation when syncing from remote.
 			!remoteSyncingKeys.contains(key)
 		else {
@@ -269,21 +264,44 @@ final class iCloudSynchronizer {
 	/**
 	Add new key and start to observe its changes.
 	*/
-	func add(_ keys: [Defaults.Keys]) {
-		self.keys.formUnion(keys)
-		syncWithoutWaiting(keys)
-		for key in keys {
-			localKeysMonitor.addObserver(key)
+	func add<Value: Defaults.Serializable>(_ key: Defaults.Key<Value>) {
+		let (isInserted, _) = self.keys.insert(key)
+		guard isInserted else {
+			return
+		}
+
+		localKeysMonitor.add(key: key)
+
+		// If the local value is the default value, only sync from remote, since all devices should already have the default value.
+		if key._isDefaultValue {
+			guard case .remote = latestDataSource(forKey: key) else {
+				return
+			}
+
+			syncWithoutWaiting([key], .remote)
+		} else {
+			syncWithoutWaiting([key])
 		}
 	}
 
 	/**
-	Remove key and stop the observation.
+	Remove the keys and stop the observation.
 	*/
-	func remove(_ keys: [Defaults.Keys]) {
+	func remove<each Value>(_ keys: repeat Defaults.Key<each Value>) {
+		for key in repeat (each keys) {
+			self.keys.remove(key)
+			localKeysMonitor.remove(key: key)
+		}
+	}
+
+	/**
+	Remove the keys and stop the observation.
+	*/
+	func remove(_ keys: [Defaults._AnyKey]) {
 		self.keys.subtract(keys)
+
 		for key in keys {
-			localKeysMonitor.removeObserver(key)
+			localKeysMonitor.remove(key: key)
 		}
 	}
 
@@ -536,10 +554,11 @@ extension iCloudSynchronizer {
 			guard let remoteTimestamp = self.timestamp(forKey: key, source: .remote) else {
 				continue
 			}
+
 			if
 				let localTimestamp = self.timestamp(forKey: key, source: .local),
 				localTimestamp >= remoteTimestamp
-			{
+			{ // swiftlint:disable:this opening_brace
 				continue
 			}
 
